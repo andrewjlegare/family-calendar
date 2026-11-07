@@ -181,5 +181,7 @@ async function init(){
 init();
 })();
 </script>
+<script>(function(){function post(){try{parent.postMessage({fcHeight:Math.ceil(document.body.getBoundingClientRect().height+40)},'*')}catch(e){}}
+if(window.ResizeObserver)new ResizeObserver(post).observe(document.body);window.addEventListener('load',post);setInterval(post,1500)})();</script>
 </body>
 </html>
