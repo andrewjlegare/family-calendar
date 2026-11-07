@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Legare Family Calendar</title>
+<style>
+:root{--bg:#f4f5fb;--card:#fff;--ink:#1e1b3a;--mute:#6b7280;--line:#e5e7eb;--a:#6366f1;--b:#ec4899}
+@media(prefers-color-scheme:dark){:root{--bg:#12121c;--card:#1c1c2b;--ink:#f1f1f8;--mute:#9a9ab0;--line:#2c2c40}}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+header{background:linear-gradient(135deg,var(--a),var(--b));color:#fff;padding:14px 18px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+header h1{font-size:19px;margin:0;flex:1}header .who{font-size:13px;opacity:.9}
+main{max-width:1100px;margin:0 auto;padding:16px}
+.card{background:var(--card);border-radius:18px;padding:16px;margin-bottom:16px;box-shadow:0 2px 10px rgba(0,0,0,.06)}
+button,input,select{font:inherit;color:inherit}
+.btn{background:var(--a);color:#fff;border:0;border-radius:12px;padding:9px 14px;cursor:pointer;font-weight:600}.btn.alt{background:var(--bg);color:var(--ink);border:1px solid var(--line)}
+input,select{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
+.mute{color:var(--mute);font-size:13px}
+.cal{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px;margin-top:10px}
+.calh{font-size:12px;font-weight:700;text-align:center;color:var(--mute)}
+.cell{min-height:98px;border-radius:14px;padding:6px;background:var(--bg);border:1px solid var(--line);text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:3px;overflow:hidden}
+.cell.today{outline:3px solid var(--b)}.cell.sel{border-color:var(--ink)}
+.cell b{font-size:13px}.ev{font-size:10px;color:#fff;border-radius:6px;padding:1px 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cell small{font-size:10px;color:var(--mute);margin-top:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hb{display:flex;gap:8px;align-items:center;margin:8px 0}.chip{border-radius:999px;color:#fff;font-size:11px;font-weight:700;padding:3px 10px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+#login{text-align:center;padding:40px 10px}.err{color:#dc2626;font-size:14px;margin-top:10px}
+@media(max-width:700px){.cell{min-height:62px}.cell small{display:none}.ev{font-size:9px}}
+</style>
+</head>
+<body>
+<header><h1>🏡 Legare Family Calendar</h1><span class="who" id="who"></span><button class="btn alt" id="signout" hidden>Sign out</button></header>
+<main id="app"></main>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script>
+(function(){
+'use strict';
+const CLIENT_ID='1089767880251-35h0cok3bdg9qi3hr59sqjnajd7cdo2t.apps.googleusercontent.com';
+const CAL_NAME='Legare Family';
+const DEMO=location.search.includes('demo=1');
+const TZ='America/New_York';
+const KINDS={School:['🎒','#6366f1'],Family:['👨‍👩‍👧‍👦','#ec4899'],Church:['⛪','#8b5cf6'],Appointment:['📌','#f59e0b'],Bill:['💸','#475569'],Other:['✨','#10b981']};
+const DINNER={0:"Dinner at Andrew's parents (bring a dish)",1:'Meatballs or Philly cheesesteaks',2:'Sausage & peppers with rice',3:'Chicken strips & mac and cheese',4:'Soup',5:'Pizza',6:'Nice dinner (Saturday special)'};
+const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const iso=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+let token=null,tokenExp=0,calId=null,me='',events=[],err='',busy=false;
+let calMonth=iso(new Date()).slice(0,7),sel=iso(new Date());
+const store={get(k){try{return JSON.parse(localStorage.getItem(k))}catch(e){return null}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
+
+/* ---------- Google API layer ---------- */
+async function g(path,opt={}){
+  if(DEMO)return demoApi(path,opt);
+  if(Date.now()>tokenExp-60000)await getToken(false);
+  const r=await fetch('https://www.googleapis.com/calendar/v3'+path,{method:opt.method||'GET',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:opt.body?JSON.stringify(opt.body):undefined});
+  if(r.status===401){await getToken(false);return g(path,opt)}
+  if(r.status===204)return null;
+  const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error&&j.error.message||('Google error '+r.status));return j;
+}
+let tc=null;
+function getToken(interactive){
+  return new Promise((res,rej)=>{
+    if(!window.google||!google.accounts){return rej(new Error('Google sign-in is still loading — try again in a second.'))}
+    tc=tc||google.accounts.oauth2.initTokenClient({client_id:CLIENT_ID,scope:'https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/userinfo.email',callback:()=>{}});
+    tc.callback=r=>{if(r.error)return rej(new Error(r.error_description||r.error));token=r.access_token;tokenExp=Date.now()+(+r.expires_in||3600)*1000;store.set('fc.tok',{token,tokenExp});res()};
+    tc.error_callback=e=>rej(new Error(e.message||e.type||'Sign-in cancelled'));
+    tc.requestAccessToken({prompt:interactive?'consent select_account':'',login_hint:store.get('fc.email')||undefined});
+  });
+}
+
+/* ---------- calendar bootstrap ---------- */
+async function findCal(){
+  const l=await g('/users/me/calendarList?minAccessRole=writer&maxResults=250');
+  return (l.items||[]).find(c=>c.summary===CAL_NAME);
+}
+async function bootstrap(){
+  let c=await findCal();
+  me=(await g('/calendars/primary')).id||'';store.set('fc.email',me);
+  if(!c){
+    const partner=(store.get('fc.partner')||'').trim();
+    if(!partner)throw new Error('SETUP: first sign-in — type your spouse\'s Gmail address below, then sign in again. (If your spouse already set this up, ask them to share the "'+CAL_NAME+'" calendar with you.)');
+    c=await g('/calendars',{method:'POST',body:{summary:CAL_NAME,description:'Shared family calendar — managed by the Legare Family Calendar site',timeZone:TZ}});
+    await g('/calendars/'+encodeURIComponent(c.id)+'/acl?sendNotifications=false',{method:'POST',body:{role:'writer',scope:{type:'user',value:partner}}});
+    await seedRecurring(c.id);
+  }
+  calId=c.id;
+}
+function nextDow(dow){const d=new Date();while(d.getDay()!==dow)d.setDate(d.getDate()+1);return iso(d)}
+function addDay(s,n){const d=new Date(s+'T12:00');d.setDate(d.getDate()+n);return iso(d)}
+async function seedRecurring(id){
+  const mk=(title,dow,byday,kind)=>{const s=nextDow(dow);return {summary:KINDS[kind][0]+' '+title,start:{date:s},end:{date:addDay(s,1)},recurrence:['RRULE:FREQ=WEEKLY;BYDAY='+byday],extendedProperties:{private:{kind}}}};
+  const p='/calendars/'+encodeURIComponent(id)+'/events';
+  await g(p,{method:'POST',body:mk('School / co-op day',1,'MO,WE','School')});
+  // BYDAY MO,WE: first occurrence must be Mon; Wednesday follows via RRULE
+  await g(p,{method:'POST',body:mk("Dinner at Andrew's parents",0,'SU','Family')});
+}
+
+/* ---------- events ---------- */
+function monthRange(){const [y,m]=calMonth.split('-').map(Number);return [new Date(y,m-1,1),new Date(y,m,1)]}
+async function load(){
+  if(!calId)return;
+  const [a,b]=monthRange(),pad=d=>{const x=new Date(d);return x};
+  a.setDate(a.getDate()-7);b.setDate(b.getDate()+7);
+  const q='?singleEvents=true&orderBy=startTime&maxResults=500&timeMin='+encodeURIComponent(a.toISOString())+'&timeMax='+encodeURIComponent(b.toISOString());
+  const r=await g('/calendars/'+encodeURIComponent(calId)+'/events'+q);
+  events=(r.items||[]).filter(e=>e.status!=='cancelled');
+}
+const evDate=e=>(e.start.date||e.start.dateTime.slice(0,10));
+const evTime=e=>e.start.dateTime?new Date(e.start.dateTime).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'';
+function kindOf(e){const k=e.extendedProperties&&e.extendedProperties.private&&e.extendedProperties.private.kind;if(k&&KINDS[k])return k;
+  const t=e.summary||'';for(const [n,[em]] of Object.entries(KINDS))if(t.startsWith(em))return n;return 'Other'}
+const dayEvents=k=>events.filter(e=>{const s=evDate(e);if(e.start.date){return k>=s&&k<(e.end.date||addDay(s,1))}return s===k});
+
+/* ---------- UI ---------- */
+function monthName(m){const [y,mo]=m.split('-').map(Number);return new Date(y,mo-1,1).toLocaleDateString(undefined,{month:'long',year:'numeric'})}
+function render(){
+  const app=$('#app');$('#who').textContent=me?('Signed in as '+me):'';$('#signout').hidden=!token&&!DEMO;
+  if(!calId){
+    app.innerHTML=`<div class="card" id="login"><h2>Sign in with Google to open the family calendar</h2><p class="mute">Everything lives in a shared Google Calendar called “${CAL_NAME}”, so it also shows up in your own Google Calendar app.</p>
+    <div class="row" style="justify-content:center"><input id="partner" type="email" placeholder="Spouse's Gmail (first-time setup only)" value="${esc(store.get('fc.partner')||'')}" style="min-width:260px"></div>
+    <button class="btn" id="signin" ${busy?'disabled':''}>${busy?'Signing in…':'Sign in with Google'}</button><div class="err">${esc(err)}</div></div>`;return;
+  }
+  const [y,mo]=calMonth.split('-').map(Number),first=new Date(y,mo-1,1),dim=new Date(y,mo,0).getDate(),lead=(first.getDay()+6)%7,tk=iso(new Date());
+  const cells=[...Array(lead).fill(null),...Array.from({length:dim},(_,i)=>iso(new Date(y,mo-1,i+1)))];while(cells.length%7)cells.push(null);
+  const sev=dayEvents(sel);
+  app.innerHTML=`<div class="card"><div class="row"><button class="btn alt" id="prev">←</button><b style="min-width:150px;text-align:center">${monthName(calMonth)}</b><button class="btn alt" id="next">→</button><button class="btn alt" id="today">Today</button><button class="btn alt" id="refresh">↻ Refresh</button><span class="mute">${err?esc(err):'In sync with Google Calendar'}</span></div>
+  <div class="cal">${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d=>`<div class="calh">${d}</div>`).join('')}
+  ${cells.map(k=>{if(!k)return '<div></div>';const ev=dayEvents(k),dow=new Date(k+'T12:00').getDay();
+   return `<button class="cell ${k===tk?'today':''} ${k===sel?'sel':''}" data-day="${k}"><b>${+k.slice(8)}</b>${ev.slice(0,3).map(e=>`<span class="ev" style="background:${KINDS[kindOf(e)][1]}">${esc(e.summary)}</span>`).join('')}${ev.length>3?`<span class="mute">+${ev.length-3} more</span>`:''}<small>${esc(dow===0?'':DINNER[dow])}</small></button>`}).join('')}</div></div>
+  <div class="grid2"><div class="card"><h2>${new Date(sel+'T12:00').toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'})}</h2>
+   ${sev.map(e=>{const k=kindOf(e);return `<div class="hb"><span class="chip" style="background:${KINDS[k][1]}">${k}</span><span style="flex:1">${esc(e.summary)} <span class="mute">${evTime(e)}${e.recurringEventId?' · repeats':''}</span></span><button class="btn alt" data-del="${e.id}" title="Delete this one">✕</button>${e.recurringEventId?`<button class="btn alt" data-delall="${e.recurringEventId}" title="Delete the whole series">✕ all</button>`:''}</div>`}).join('')||'<p class="mute">Nothing on this day.</p>'}
+   <p class="mute">Dinner plan: <b>${esc(DINNER[new Date(sel+'T12:00').getDay()])}</b></p></div>
+  <div class="card"><h2>Add to the calendar</h2><div class="row"><input id="cd" type="date" value="${sel}"><input id="ct" type="time"><input id="cti" placeholder="What's happening?" style="flex:2;min-width:150px"></div>
+   <div class="row"><select id="ck">${Object.keys(KINDS).filter(k=>k!=='Bill').map(k=>`<option>${k}</option>`).join('')}</select><select id="cr"><option value="">Just once</option><option value="WEEKLY">Every week</option><option value="MONTHLY">Every month</option></select><button class="btn" id="cadd">Add</button></div></div></div>`;
+}
+async function refresh(quiet){try{err='';await load()}catch(e){err=e.message}render()}
+async function addEvent(){
+  const ti=$('#cti').value.trim(),dt=$('#cd').value,tm=$('#ct').value,kind=$('#ck').value,rep=$('#cr').value;if(!ti||!dt)return;
+  const body={summary:KINDS[kind][0]+' '+ti,extendedProperties:{private:{kind}}};
+  if(tm){const s=new Date(dt+'T'+tm),e=new Date(s.getTime()+3600000);body.start={dateTime:s.toISOString(),timeZone:TZ};body.end={dateTime:e.toISOString(),timeZone:TZ}}
+  else{body.start={date:dt};body.end={date:addDay(dt,1)}}
+  if(rep)body.recurrence=['RRULE:FREQ='+rep];
+  try{await g('/calendars/'+encodeURIComponent(calId)+'/events',{method:'POST',body});sel=dt;calMonth=dt.slice(0,7);await refresh()}catch(e){err=e.message;render()}
+}
+async function del(id){try{await g('/calendars/'+encodeURIComponent(calId)+'/events/'+encodeURIComponent(id),{method:'DELETE'});await refresh()}catch(e){err=e.message;render()}}
+
+document.addEventListener('click',async e=>{
+  const t=e.target.closest('button');if(!t)return;
+  if(t.id==='signin'){const pe=$('#partner');if(pe&&pe.value.trim())store.set('fc.partner',pe.value.trim());busy=true;err='';render();try{if(CLIENT_ID.startsWith('__'))throw new Error('This site is not connected to Google yet (missing client ID).');await getToken(true);await bootstrap();await load()}catch(x){err=x.message;calId=null}busy=false;render()}
+  else if(t.id==='signout'){if(token&&window.google)google.accounts.oauth2.revoke(token,()=>{});token=null;calId=null;events=[];store.set('fc.tok',null);render()}
+  else if(t.dataset.day){sel=t.dataset.day;render()}
+  else if(t.id==='prev'||t.id==='next'){const [y,m]=calMonth.split('-').map(Number),d=new Date(y,m-1+(t.id==='next'?1:-1),1);calMonth=iso(d).slice(0,7);await refresh()}
+  else if(t.id==='today'){sel=iso(new Date());calMonth=sel.slice(0,7);await refresh()}
+  else if(t.id==='refresh')await refresh();
+  else if(t.id==='cadd')await addEvent();
+  else if(t.dataset.del)await del(t.dataset.del);
+  else if(t.dataset.delall)await del(t.dataset.delall);
+});
+setInterval(()=>{if(calId&&!document.hidden)refresh(true)},180000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&calId)refresh(true)});
+
+/* ---------- demo mode (?demo=1): fake Google, for previewing the layout ---------- */
+let demoEv=[];
+async function demoApi(path,opt){
+  if(path.includes('/events')&&(opt.method||'GET')==='GET'){
+    const out=[];const a=new Date();a.setMonth(a.getMonth()-1);for(let i=0;i<90;i++){const d=new Date(a);d.setDate(a.getDate()+i);const k=iso(d),w=d.getDay();
+      if(w===1||w===3)out.push({id:'s'+k,summary:'🎒 School / co-op day',start:{date:k},end:{date:addDay(k,1)},recurringEventId:'s',extendedProperties:{private:{kind:'School'}}});
+      if(w===0)out.push({id:'d'+k,summary:"👨‍👩‍👧‍👦 Dinner at Andrew's parents",start:{date:k},end:{date:addDay(k,1)},recurringEventId:'d',extendedProperties:{private:{kind:'Family'}}})}
+    return {items:out.concat(demoEv)};
+  }
+  if(path.includes('/events')&&opt.method==='POST'){demoEv.push({...opt.body,id:'x'+Math.random()});return {}}
+  if(path.includes('/events/')&&opt.method==='DELETE'){demoEv=demoEv.filter(e=>!path.includes(e.id));return null}
+  return {};
+}
+async function init(){
+  if(DEMO){me='demo@example.com';calId='demo';await load();return render()}
+  const t=store.get('fc.tok');
+  if(t&&t.tokenExp>Date.now()+60000){token=t.token;tokenExp=t.tokenExp;try{await bootstrap();await load()}catch(x){calId=null;err=x.message}}
+  render();
+}
+init();
+})();
+</script>
+</body>
+</html>
